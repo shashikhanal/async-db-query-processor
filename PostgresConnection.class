@@ -1,0 +1,90 @@
+// pseudocode implementation of PostgresConnection class
+Class PostgresConnection:
+	// properties
+	asyncQueryQueue = []          // queue of queries to execute asynchronously
+	pendingAsyncQueriesBucket = []      // bucket of queries currently being processed
+
+	Constructor:
+		// initialize database connection
+    syncConnection = postgresConnections[syncConnectionHash]; // handles synchronous database queries
+    asyncConnection = postgresConnections[asyncConnectionHash]; // handles asynchronous database queries
+
+	Method executeAsyncQuery(query, errorMessage = "Error!", callbackFunction = null):
+		// capture current call stack for debugging
+		callStack = CaptureCallStack()
+
+		// add transaction start, query, and commit to async query queue
+		AddToQueue(asyncQueryQueue, "BEGIN", null, callStack, errorMessage)
+		AddToQueue(asyncQueryQueue, query, callbackFunction, callStack, errorMessage)
+		AddToQueue(asyncQueryQueue, "COMMIT", null, callStack, errorMessage)
+
+		// process the queue
+		CycleQueue()
+
+	Method CycleQueue():
+		If Not PostgresConnectionBusy():
+			ProcessBatchResults()
+			SendNextBatch()
+
+	Method ProcessBatchResults():
+		While PostgresHasPendingResults(asyncConnection):
+			result = GetAsyncResultFromPostgres(asyncConnection)
+
+			If pendingAsyncQueriesBucket is not empty:
+					currentQuery = DequeueAndReturn(pendingAsyncQueriesBucket)
+			Else:
+					ThrowError("More async results than pending queries.")
+
+			errorMessage = currentQuery.errorOnFail
+			query = currentQuery.query
+
+			// execute callback if provided
+			If currentQuery.callback is callable:
+				Try:
+					ExecuteCallback(currentQuery.callback, result)
+				Catch Exception as e:
+					RaiseError("Callback raised an exception.", query, currentQuery.callStack)
+
+			// check for Postgres errors during query execution
+			error = GetResultError(result)
+			If error:
+				RaiseError(errorMessage, error, query, currentQuery.callStack)
+
+		If pendingAsyncQueriesBucket is not empty:
+			ThrowError("More pending queries than async results.")
+
+	Method SendNextBatch():
+		// combine all queries in asyncQueryQueue into a single batch
+		queries = CombineQueries(asyncQueryQueue)
+
+		If queries is not empty:
+			success = SendQueriesToPostgresInAsync(asyncConnection, queries)// FROM HERE - EDIT
+
+			If success:
+				pendingAsyncQueriesBucket = asyncQueryQueue
+				asyncQueryQueue = []
+			Else:
+				// execute callback for each query in case of error
+				For each query in asyncQueryQueue:
+					If query.callback is callable:
+						Try:
+							ExecuteCallback(query.callback, null)
+						Catch Exception as e:
+							RaiseError("Async query callback raised an exception.", query.query, query.callStack)
+
+				RaiseError("Failed to send queries from the queue.", GetLastPostgresError(), queries)
+
+	Method ProcessQueue():
+		While asyncQueryQueue is not empty OR pendingAsyncQueriesBucket is not empty:
+			CycleQueue()
+
+	Function AddToQueue(queue, query, callback, callStack, errorMessage):
+		Append(queue, {
+			"query": query,
+			"callback": callback,
+			"callStack": callStack,
+			"errorOnFail": errorMessage
+		})
+
+	Function RaiseError(message, errorDetails = null, query = null, callStack = null):
+		// throw an exception with detailed error information
